@@ -1,0 +1,220 @@
+// USED TO RETRIEVE SENTINEL DATA
+// ******************************
+var batch = require('users/fitoprincipe/geetools:batch');
+
+// Sentinel data
+var s2Sr = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED');
+// Cloud probability
+var s2Clouds = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY');
+var START_DATE = ee.Date('2022-04-01'); // Start Date
+var END_DATE = ee.Date('2022-10-31'); // End Date
+var MAX_CLOUD_PROBABILITY = 65; // Set to 65
+
+//var region =
+var region = ee.FeatureCollection("FAO/GAUL/2015/level1")
+                  .filter(ee.Filter.eq('ADM1_NAME', 'Northern Ireland')); //filter for entry that equals the UN country name 'Lebanon'
+
+//Map.setCenter(-75, 3, 12);
+Map.centerObject(table2,8);
+
+function maskClouds(img) {
+  var clouds = ee.Image(img.get('cloud_mask')).select('probability');
+  var isNotCloud = clouds.lt(MAX_CLOUD_PROBABILITY);
+  return img.updateMask(isNotCloud);
+}
+
+
+// The masks for the 10m bands sometimes do not exclude bad data at
+// scene edges, so we apply masks from the 20m and 60m bands as well.
+// Example asset that needs this operation:
+// COPERNICUS/S2_CLOUD_PROBABILITY/20190301T000239_20190301T000238_T55GDP
+function maskEdges(s2_img) {
+  return s2_img.updateMask(
+      s2_img.select('B8A').mask().updateMask(s2_img.select('B9').mask()));
+}
+
+// Filter input collections by desired data range and region.
+var criteria = ee.Filter.and(
+    ee.Filter.bounds(table2), ee.Filter.date(START_DATE, END_DATE));
+s2Sr = s2Sr.filter(criteria).map(maskEdges);
+s2Clouds = s2Clouds.filter(criteria);
+
+
+// Join S2 SR with cloud probability dataset to add cloud mask.
+var s2SrWithCloudMask = ee.Join.saveFirst('cloud_mask').apply({
+  primary: s2Sr,
+  secondary: s2Clouds,
+  condition:
+      ee.Filter.equals({leftField: 'system:index', rightField: 'system:index'})
+});
+var s2CloudMaskedAll = 
+    ee.ImageCollection(s2SrWithCloudMask).map(maskClouds);
+
+var s2CloudMaskedAllclip = s2CloudMaskedAll.map(function(image){return image.clip(table2)});
+var s2CloudMaskedPixCloud = s2CloudMaskedAllclip.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',65));
+
+//************ s2CloudMaskedPixCloud ---- IMAGE COLLECTION OF ALL THE BANDS WITH CLOUD MASK
+
+// CREATE IMAGE COLLECTION WITH DIFFERENT RESOLUTION - 10m or 20m
+// Create one collection only with bands of 10m
+var s2Bands10m = s2CloudMaskedPixCloud.select(['B2','B3','B4','B8'],['B2','B3','B4','B8']);
+// Create one collection only with bands of 20m
+var s2Bands20m = s2CloudMaskedPixCloud.select(['B5','B6','B7','B8A','B11','B12'],
+    ['B5','B6','B7','B8A','B11','B12']);
+    
+//************* s2Bands10m ----- IMAGE COLLECTION OF 10m BANDS
+//************* s2Bands20m ----- IMAGE COLLECTION OF 20m BANDS
+
+
+print("Size Bands 10m", s2Bands10m.size());
+print("Band names 10m", s2Bands10m.first().bandNames());
+
+print("Size Bands 20m", s2Bands20m.size());
+print("Band names 20m", s2Bands20m.first().bandNames());
+
+
+// Palettes to visualise values
+var rgbVis = {min: 0, max: 3000, bands: ['B4', 'B3', 'B2']};
+var NDVIpalette = ['FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', '74A901', '66A000', '529400', '3E8601', '207401', '056201', '004C00', '023B01', '012E01', '011D01', '011301'];
+var NDVIpalette2 = ['#8bc4f9','#c9995c','#c7d270','#8add60','#097210'];
+
+// CALCULATE NDVI
+// https://igis.ucanr.edu/Tech_Notes/EarthEngine_NDVI/
+// --------------
+var addNDVI = function(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return image.addBands(ndvi);
+};
+
+// Retrieve the projection information from a band of the original image.
+// Call getInfo() on the projection to request a client-side object containing
+// the crs and transform information needed for the client-side Export function.
+// https://developers.google.com/earth-engine/guides/exporting
+
+// Add NDVI to s2Bands10m since NDVI has resolution of 10m
+var s2Bands10m_NDVI = s2Bands10m.map(addNDVI);
+
+// Get Projection of 10m
+var projection10m = s2Bands10m_NDVI.first().select('NDVI').projection().getInfo();
+print("Projection 10m:",projection10m);
+
+//************ s2Bands10m_NDVI - Bands with 10m + NDVI
+//************ projection10m - Projection information of 10m
+
+
+// CALCULATE SWIR RATIO
+// --------------------
+var addSWIRratio = function(image) {
+  var swirratio = image.expression(
+    '(SWIR2 / SWIR1)', {
+      'SWIR1': image.select('B11'),
+      'SWIR2': image.select('B12'),
+  }).rename('SWIR');
+  return image.addBands(swirratio);
+};
+
+// Add SWIR to s2Bands20m since SWIR has resolution of 20m
+var s2Bands20m_SWIR = s2Bands20m.map(addSWIRratio);
+//*********** s2Bands20m_SWIR - Bands with 20m + SWIR
+
+var projection20m = s2Bands20m_SWIR.first().select('SWIR').projection().getInfo();
+print("Projection 20m:",projection20m);
+//*********** projection20m - Projection information of 20m
+
+
+print("All band names 10m",s2Bands10m_NDVI.first().bandNames());
+print("All band names 20m",s2Bands20m_SWIR.first().bandNames());
+
+
+var visualization = {
+  min: -1.0,
+  max: 3.0,
+  bands: ['SWIR']
+};
+Map.addLayer(
+    s2Bands10m_NDVI.mean(), rgbVis, 'Bands 10m',
+    true);
+
+Map.addLayer(
+    s2Bands20m_SWIR.mean(), visualization, 'Bands 20m',
+    true);
+
+
+// MOSAIC
+// https://gis.stackexchange.com/questions/280156/mosaicking-image-collection-by-date-day-in-google-earth-engine
+// **************************************************************
+function mosaicByDate(imcol){
+  // imcol: An image collection
+  // returns: An image collection
+  var imlist = imcol.toList(imcol.size());
+
+  var unique_dates = imlist.map(function(im){
+    return ee.Image(im).date().format("YYYY-MM-dd");
+  }).distinct();
+
+  var mosaic_imlist = unique_dates.map(function(d){
+    d = ee.Date(d);
+
+    var im = imcol
+      .filterDate(d, d.advance(1, "day"))
+      .mosaic();
+
+    return im.set(
+        "system:time_start", d.millis(), 
+        "system:id", d.format("YYYY-MM-dd"));
+  });
+
+  return ee.ImageCollection(mosaic_imlist);
+}
+
+var s2Bands10m_NDVI_mosaic = mosaicByDate(s2Bands10m_NDVI);
+var s2Bands20m_SWIR_mosaic = mosaicByDate(s2Bands20m_SWIR);
+
+//*************** s2Bands10m_NDVI_mosaic - Mosaic of Bands 10m (already mosaic)
+//*************** s2Bands20m_SWIR_mosaic - Mosaic of Bands 20m (already mosaic)
+
+var scale_swir = 20;
+var scale_ndvi = 10;
+
+// Calculate Mean
+var s2Bands10m_NDVI_mean = s2Bands10m_NDVI_mosaic.mean();
+var s2Bands20m_SWIR_mean = s2Bands20m_SWIR_mosaic.mean();
+
+//*************** s2Bands10m_NDVI_mean - Average of Bands 10m (already mosaic)
+//*************** s2Bands20m_SWIR_mean - Average of Bands 20m (already mosaic)
+
+print("All band names 10m MEAN",s2Bands10m_NDVI_mean.bandNames());
+print("All band names 20m MEAN",s2Bands20m_SWIR_mean.bandNames());
+
+var B2_10m=s2Bands10m_NDVI_mosaic.select(['B2']);
+var B3_10m=s2Bands10m_NDVI_mosaic.select(['B3']);
+var B4_10m=s2Bands10m_NDVI_mosaic.select(['B4']);
+var B8_10m=s2Bands10m_NDVI_mosaic.select(['B8']);
+var NDVI_10m=s2Bands10m_NDVI_mosaic.select(['NDVI']);
+
+var B5_20m=s2Bands20m_SWIR_mosaic.select(['B5']);
+var B6_20m=s2Bands20m_SWIR_mosaic.select(['B6']);
+var B7_20m=s2Bands20m_SWIR_mosaic.select(['B7']);
+var B8A_20m=s2Bands20m_SWIR_mosaic.select(['B8A']);
+var B11_20m=s2Bands20m_SWIR_mosaic.select(['B11']);
+var B12_20m=s2Bands20m_SWIR_mosaic.select(['B12']);
+var SWIR_20m=s2Bands20m_SWIR_mosaic.select(['SWIR']);
+
+Map.addLayer(
+    B2_10m.mean(), visualization, 'Bands B2',
+    true);
+
+// Bulk export
+batch.Download.ImageCollection.toDrive(NDVI_10m, 'SentinelNDFI', {
+  name: 'NDVI_10_{system:id}',
+  type: 'float',
+  scale: 10,
+  region: table2,  
+  crs: projection10m.crs,
+  crsTransform: projection10m.transform,
+  fileFormat:'GeoTIFF'
+});
+
+
+
+

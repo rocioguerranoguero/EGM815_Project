@@ -1,0 +1,159 @@
+// RETRIEVE NDVI FROM MODIS TERRA FREE OF CLOUDS (masked by DetailedQA)
+// https://lpdaac.usgs.gov/products/mod13q1v061/
+// https://developers.google.com/earth-engine/datasets/catalog/MODIS_061_MOD13Q1
+
+var batch = require('users/fitoprincipe/geetools:batch');
+
+var startdate = '2022-04-01';
+var enddate = '2022-10-31';
+
+var extent_ni = ee.FeatureCollection("FAO/GAUL/2015/level1")
+                  .filter(ee.Filter.eq('ADM1_NAME', 'Northern Ireland')); //filter for entry that equals the UN country name 'Lebanon'
+
+
+var dataset = ee.ImageCollection('MODIS/061/MOD13Q1')
+                  .filterBounds(table)
+                  .filter(ee.Filter.date(startdate, enddate));
+                  
+var ndvi = dataset.select('NDVI');
+var ndviVis = {
+  min: 0.0,
+  max: 8000.0,
+  palette: [
+    'FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', '74A901',
+    '66A000', '529400', '3E8601', '207401', '056201', '004C00', '023B01',
+    '012E01', '011D01', '011301'
+  ],
+};
+Map.centerObject(extent_ni,9);
+Map.addLayer(ndvi, ndviVis, 'NDVI');
+
+print(ndvi);
+
+//https://gis.stackexchange.com/questions/450072/parsing-mod13q1-qa-layer-using-google-earth-engine-javascript-api
+// This function sets the starting position for the bit and the number of
+// positions necessary.
+var GetQABits = function(image, bitStart, numBits){
+    var bitmapped = image.select('DetailedQA').rightShift(bitStart).mod(Math.pow(2, numBits));
+    return bitmapped;
+};
+
+// VI quality indicators
+
+// Bitmask for DetailedQA
+
+// Bits 0-1: VI quality (MODLAND QA Bits)
+// 0: VI produced with good quality
+// 1: VI produced, but check other QA
+// 2: Pixel produced, but most probably cloudy
+// 3: Pixel not produced due to other reasons than clouds
+
+// Bits 2-5: VI usefulness
+// 0: Highest quality
+// 1: Lower quality
+// 2: Decreasing quality
+// 4: Decreasing quality
+// 8: Decreasing quality
+// 9: Decreasing quality
+// 10: Decreasing quality
+// 12: Lowest quality
+// 13: Quality so low that it is not useful
+// 14: L1B data faulty
+// 15: Not useful for any other reason/not processed
+
+// Bits 6-7: Aerosol Quantity
+// 0: Climatology
+// 1: Low
+// 2: Intermediate
+// 3: High
+
+// Bit 8: Adjacent cloud detected
+// 0: No
+// 1: Yes
+
+// Bit 9: Atmosphere BRDF correction
+// 0: No
+// 1: Yes
+
+// Bit 10: Mixed Clouds
+// 0: No
+// 1: Yes
+
+// Bits 11-13: Land/water mask
+// 0: Shallow ocean
+// 1: Land (nothing else but land)
+// 2: Ocean coastlines and lake shorelines
+// 3: Shallow inland water
+// 4: Ephemeral water
+// 5: Deep inland water
+// 6: Moderate or continental ocean
+// 7: Deep ocean
+
+// Bit 14: Possible snow/ice
+// 0: No
+// 1: Yes
+
+// Bit 15: Possible shadow
+// 0: No
+// 1: Yes
+
+var MaskToBestBits = function(image){
+  var detailqa = image.select('DetailedQA');
+  var VIQual = GetQABits(detailqa, 0, 2);
+  var VIUse = GetQABits(detailqa, 2, 4);
+  var VIaer = GetQABits(detailqa, 6, 2);
+  var Viadjcl = GetQABits(detailqa, 8, 1);
+  var atmbrdf = GetQABits(detailqa, 9, 1);
+  var mxdcl = GetQABits(detailqa,  10, 1);
+  var lnwt = GetQABits(detailqa, 11, 3);
+  var snowice = GetQABits(detailqa, 14, 1);
+  var shadow = GetQABits(detailqa, 15, 1);
+  // update the image mask to select the indicator values you.
+  // the values in the following updateMasks are GUESSES based on what you posted
+  // with regard to the indicator. For example, VI Quality has 2 values, 0
+  // or 1, that are good, so used less than 2 ("lt(2)") to get either.
+  return image.addBands(detailqa)
+    .updateMask(VIQual.eq(0)) //Suggested, but not sure what you want here
+    // .updateMask(VIUse.lt(8)) //Suggested, but not sure what you want here
+    // .updateMask(VIaer.lt(3)) //Suggested, but not sure what you want here
+    // .updateMask(Viadjcl.eq(1)) //Suggested, but not sure what you want here
+    // .updateMask(atmbrdf.lt(1)) //Suggested, but not sure what you want here
+    // .updateMask(mxdcl.eq(0)) //Suggested, but not sure what you want here
+    // .updateMask(lnwt.eq(1)) //Suggested, but not sure what you want here
+    // .updateMask(snowice.eq(0)) //Suggested, but not sure what you want here
+    // .updateMask(shadow.eq(0)); //Suggested, but not sure what you want here
+};
+
+
+                  
+var dataset_qafiltered = ee.ImageCollection('MODIS/061/MOD13Q1')
+.filterDate(startdate,enddate)
+.map(MaskToBestBits)
+.filterBounds(extent_ni)
+.map(function(im) { return im.clip(extent_ni)});
+
+var newndvi = dataset_qafiltered.select('NDVI')
+
+
+print('newndvi', newndvi);
+Map.addLayer(newndvi, ndviVis, 'New_NDVI');
+
+var projectionNDVI = newndvi.first().projection().getInfo();
+print("Projection NDVI:",projectionNDVI);
+
+// Bulk export
+batch.Download.ImageCollection.toDrive(newndvi, 'MODIS_NDVI', {
+  name: 'NDVI_EPSG29903_{system:id}',
+  filename: 'NDVI_{system:id}',
+  type: 'float',
+  scale: 250,
+  region: extent_ni,  
+  //crs: projectionNDVI.crs,
+  crs: 'EPSG:29903',
+  crsTransform: projectionNDVI.transform,
+  fileFormat:'GeoTIFF'
+});
+
+
+
+
